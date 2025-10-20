@@ -99,6 +99,20 @@ def _get_tls12_relax_adapter():
 # -----------------------------
 # Robust HTML fetcher
 # -----------------------------
+
+async def _playwright_fetch_html(url: str) -> str:
+    # Headless Chromium fetch with real browser fingerprint
+    from playwright.async_api import async_playwright
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(user_agent=HEADERS["User-Agent"])
+        page = await context.new_page()
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        html = await page.content()
+        await browser.close()
+        return html
+
+
 def _get_html(url: str) -> str:
     from urllib.parse import urlparse
     host = (urlparse(url).hostname or "").lower()
@@ -180,6 +194,14 @@ def _get_html(url: str) -> str:
 
     # If all strategies failed
     raise HTTPException(status_code=502, detail=f"Network error fetching {url}: all client strategies failed")
+        # 7) Playwright (final, RW only)
+    if "robertwaltersplc.com" in host:
+        try:
+            import asyncio
+            return asyncio.run(_playwright_fetch_html(url))
+        except Exception:
+            pass
+
 
 # -----------------------------
 # Utilities
