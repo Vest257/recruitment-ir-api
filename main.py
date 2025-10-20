@@ -83,9 +83,10 @@ class TLS12RelaxAdapter(HTTPAdapter):
 def _get_html(url: str) -> str:
     import ssl
     from urllib.parse import urlparse
+
     host = (urlparse(url).hostname or "").lower()
 
-    # Try 1: plain requests (HTTP/1.1)
+    # 1) Plain requests (HTTP/1.1)
     try:
         r = requests.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
         r.raise_for_status()
@@ -93,62 +94,84 @@ def _get_html(url: str) -> str:
     except Exception:
         pass
 
-    # Try 2: if Robert Walters, force TLS1.2 + SECLEVEL=1 via custom adapter
+    # 2) requests + TLS1.2 + SECLEVEL=1 (RW only)
     try:
         if "robertwaltersplc.com" in host:
-            s = requests.Session()
-            s.headers.update(HEADERS)
-            s.mount("https://", TLS12RelaxAdapter())
-            s.mount("http://", HTTPAdapter())
-            r = s.get(url, timeout=30, allow_redirects=True)
-            r.raise_for_status()
-            return r.text
+            TLS12RelaxAdapter = _get_tls12_relax_adapter()
+            if TLS12RelaxAdapter:
+                from requests.adapters import HTTPAdapter
+                s = requests.Session()
+                s.headers.update(HEADERS)
+                s.mount("https://", TLS12RelaxAdapter())
+                s.mount("http://", HTTPAdapter())
+                r = s.get(url, timeout=30, allow_redirects=True)
+                r.raise_for_status()
+                return r.text
     except Exception:
         pass
 
-    # Try 3: httpx HTTP/1.1 with relaxed context
-    try:
-        import httpx
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
-        if "robertwaltersplc.com" in host:
-            ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
-        with httpx.Client(http2=False, headers=HEADERS, timeout=30, follow_redirects=True, verify=ctx) as client:
-            r = client.get(url)
+    # 3) httpx HTTP/1.1 (optional)
+    httpx = _get_httpx()
+    if httpx:
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+            if "robertwaltersplc.com" in host:
+                try:
+                    ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+                except Exception:
+                    pass
+            with httpx.Client(http2=False, headers=HEADERS, timeout=30, follow_redirects=True, verify=ctx) as client:
+                r = client.get(url)
+                r.raise_for_status()
+                return r.text
+        except Exception:
+            pass
+        # 4) httpx HTTP/2
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+            if "robertwaltersplc.com" in host:
+                try:
+                    ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+                except Exception:
+                    pass
+            with httpx.Client(http2=True, headers=HEADERS, timeout=30, follow_redirects=True, verify=ctx) as client:
+                r = client.get(url)
+                r.raise_for_status()
+                return r.text
+        except Exception:
+            pass
+
+    # 5) cloudscraper (optional)
+    cloudscraper = _get_cloudscraper()
+    if cloudscraper:
+        try:
+            scraper = cloudscraper.create_scraper(
+                browser={"browser": "chrome", "platform": "windows", "mobile": False}
+            )
+            scraper.headers.update(HEADERS)
+            r = scraper.get(url, timeout=30, allow_redirects=True)
             r.raise_for_status()
             return r.text
-    except Exception:
-        pass
+        except Exception:
+            pass
 
-    # Try 4: httpx HTTP/2 with the same context
-    try:
-        import httpx
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
-        if "robertwaltersplc.com" in host:
-            ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
-        with httpx.Client(http2=True, headers=HEADERS, timeout=30, follow_redirects=True, verify=ctx) as client:
-            r = client.get(url)
-            r.raise_for_status()
-            return r.text
-    except Exception:
-        pass
-
-    # Try 5: curl_cffi with a list of supported impersonations (pick the first that works)
-    try:
-        from curl_cffi import requests as cfreq
+    # 6) curl_cffi with several fingerprints (optional)
+    cfreq = _get_curl_cffi()
+    if cfreq:
         for fp in ["chrome120", "chrome116", "chrome110", "chrome99", "edge101", "firefox110", "safari15_3"]:
             try:
-                r = cfreq.get(
-                    url,
-                    headers=HEADERS,
-                    impersonate=fp,
-                    timeout=30,
-                    allow_redirects=True,
-                )
+                r = cfreq.get(url, headers=HEADERS, impersonate=fp, timeout=30, allow_redirects=True)
                 r.raise_for_status()
                 return r.text
             except Exception:
                 continue
-        raise HTTPException(status_code=502, detail=f"All_
+        raise HTTPException(
+            status_code=502,
+            detail=f"Network error fetching {url}: all curl_cffi impersonations failed"
+        )
+
+    # If all strategies failed
+    raise HTTPException(status_code=502, detail=f"Network error fetching {url}: all client strategies failed")
 
 def _same_site_pdf(href: str, base_url: str) -> Optional[str]:
     if not href:
