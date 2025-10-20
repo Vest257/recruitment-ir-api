@@ -112,6 +112,20 @@ async def _playwright_fetch_html(url: str) -> str:
         await browser.close()
         return html
 
+# --- Playwright sync fallback (real Chromium) for Robert Walters only ---
+def _playwright_fetch_html_sync(url: str) -> str:
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(user_agent=HEADERS.get("User-Agent"))
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            html = page.content()
+            browser.close()
+            return html
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Playwright fetch failed for {url}: {e}")
 
 def _get_html(url: str) -> str:
     from urllib.parse import urlparse
@@ -201,6 +215,14 @@ def _get_html(url: str) -> str:
             return asyncio.run(_playwright_fetch_html(url))
         except Exception:
             pass
+
+    # 8) Final fallback: real browser via Playwright (RW only, sync)
+    if "robertwaltersplc.com" in host:
+        try:
+            return _playwright_fetch_html_sync(url)
+        except Exception:
+            pass
+
 
 
 # -----------------------------
