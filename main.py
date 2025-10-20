@@ -16,8 +16,12 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-GB,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
     "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
 }
+
 
 ALLOWED_HOSTS = {
     "www.haysplc.com","haysplc.com",
@@ -46,15 +50,27 @@ def _same_site_pdf(href: str, base_url: str) -> Optional[str]:
     return full
 
 def _get_html(url: str) -> str:
+    # 1) try requests (HTTP/1.1)
     try:
         r = requests.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
         r.raise_for_status()
         return r.text
     except requests.HTTPError as e:
-        # surface the cause cleanly instead of a 500
-        raise HTTPException(status_code=502, detail=f"Upstream error fetching {url}: {e.response.status_code}") from e
-    except requests.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"Network error fetching {url}: {e}") from e
+        status = getattr(e.response, "status_code", None)
+        # If 403/4xx or TLS problems, fall back to httpx HTTP/2
+    except requests.RequestException:
+        pass
+
+    # 2) fallback: httpx with HTTP/2 (often fixes TLSV1_ALERT_INTERNAL_ERROR)
+    try:
+        import httpx
+        with httpx.Client(http2=True, headers=HEADERS, timeout=30, follow_redirects=True) as client:
+            r = client.get(url)
+            r.raise_for_status()
+            return r.text
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=502, detail=f"Network error fetching {url}: {e}")
 
 
 def _fetch_pdfs(base_url: str) -> List[Dict[str, str]]:
