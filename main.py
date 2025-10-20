@@ -1,4 +1,4 @@
-# main.py — self-contained, safe imports, robust fetchers, PDF extract endpoints
+# main.py — robust fetch + PDF extraction API (Hays, PageGroup, Robert Walters)
 
 import io, re, ssl
 from typing import List, Optional, Dict, Any
@@ -42,19 +42,20 @@ HEADERS = {
     "Sec-Fetch-User": "?1",
 }
 
+# Filter out ESG/policy PDFs by default
 NEGATIVE_KEYWORDS = [
-    "sustainability","esg","human rights","modern slavery",
-    "tax strategy","gender pay","gri","privacy","policy"
+    "sustainability", "esg", "human rights", "modern slavery",
+    "tax strategy", "gender pay", "gri", "privacy", "policy"
 ]
 
 app = FastAPI(
     title="Recruitment Firms Investor PDF API",
     description="Official investor PDFs + text/table extraction for Hays, PageGroup, and Robert Walters.",
-    version="1.3.2",
+    version="1.4.0",
 )
 
 # -----------------------------
-# Optional/guarded imports & helpers
+# Optional/guarded imports
 # -----------------------------
 def _get_httpx():
     try:
@@ -96,22 +97,6 @@ def _get_tls12_relax_adapter():
     except Exception:
         return None
 
-# -----------------------------
-# Robust HTML fetcher
-# -----------------------------
-
-async def _playwright_fetch_html(url: str) -> str:
-    # Headless Chromium fetch with real browser fingerprint
-    from playwright.async_api import async_playwright
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(user_agent=HEADERS["User-Agent"])
-        page = await context.new_page()
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        html = await page.content()
-        await browser.close()
-        return html
-
 # --- Playwright sync fallback (real Chromium) for Robert Walters only ---
 def _playwright_fetch_html_sync(url: str) -> str:
     try:
@@ -127,6 +112,9 @@ def _playwright_fetch_html_sync(url: str) -> str:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Playwright fetch failed for {url}: {e}")
 
+# -----------------------------
+# Robust HTML fetcher
+# -----------------------------
 def _get_html(url: str) -> str:
     from urllib.parse import urlparse
     host = (urlparse(url).hostname or "").lower()
@@ -204,26 +192,16 @@ def _get_html(url: str) -> str:
                 return r.text
             except Exception:
                 continue
-        raise HTTPException(status_code=502, detail=f"Network error fetching {url}: all curl_cffi impersonations failed")
 
-    # If all strategies failed
-    raise HTTPException(status_code=502, detail=f"Network error fetching {url}: all client strategies failed")
-        # 7) Playwright (final, RW only)
-    if "robertwaltersplc.com" in host:
-        try:
-            import asyncio
-            return asyncio.run(_playwright_fetch_html(url))
-        except Exception:
-            pass
-
-    # 8) Final fallback: real browser via Playwright (RW only, sync)
+    # 7) Final fallback: real browser via Playwright (RW only, sync)
     if "robertwaltersplc.com" in host:
         try:
             return _playwright_fetch_html_sync(url)
         except Exception:
             pass
 
-
+    # If all strategies failed
+    raise HTTPException(status_code=502, detail=f"Network error fetching {url}: all client strategies failed")
 
 # -----------------------------
 # Utilities
