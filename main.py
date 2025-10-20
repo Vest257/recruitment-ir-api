@@ -50,26 +50,72 @@ def _same_site_pdf(href: str, base_url: str) -> Optional[str]:
     return full
 
 def _get_html(url: str) -> str:
-    # 1) try requests (HTTP/1.1)
+    import ssl
+    from urllib.parse import urlparse
+
+    host = (urlparse(url).hostname or "").lower()
+
+    # 1) Try plain requests (HTTP/1.1) with browser headers
     try:
         r = requests.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
         r.raise_for_status()
         return r.text
-    except requests.HTTPError as e:
-        status = getattr(e.response, "status_code", None)
-        # If 403/4xx or TLS problems, fall back to httpx HTTP/2
-    except requests.RequestException:
+    except Exception:
+        pass  # we’ll fall through to more specific strategies
+
+    # 2) If the host is robertwaltersplc.com, retry with a relaxed SSL context (SECLEVEL=1)
+    #    Some older/load-balanced TLS stacks require this.
+    try:
+        if "robertwaltersplc.com" in host:
+            import urllib3
+            from requests.adapters import HTTPAdapter
+            from urllib3.poolmanager import PoolManager
+
+            class TLSRelaxAdapter(HTTPAdapter):
+                def init_poolmanager(self, *args, **kwargs):
+                    ctx = ssl.create_default_context()
+                    # Lower security level for compatibility with some servers
+                    ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+                    kwargs["ssl_context"] = ctx
+                    return super().init_poolmanager(*args, **kwargs)
+
+            s = requests.Session()
+            s.headers.update(HEADERS)
+            s.mount("https://", TLSRelaxAdapter())
+            s.mount("http://", HTTPAdapter())
+            r = s.get(url, timeout=30, allow_redirects=True)
+            r.raise_for_status()
+            return r.text
+    except Exception:
         pass
 
-    # 2) fallback: httpx with HTTP/2 (often fixes TLSV1_ALERT_INTERNAL_ERROR)
+    # 3) Final fallback: httpx (HTTP/2 OFF first, then ON) with the same relaxed SSL context for RW
     try:
         import httpx
-        with httpx.Client(http2=True, headers=HEADERS, timeout=30, follow_redirects=True) as client:
+        ctx = ssl.create_default_context()
+        if "robertwaltersplc.com" in host:
+            ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+
+        # Try HTTP/1.1
+        with httpx.Client(http2=False, headers=HEADERS, timeout=30, follow_redirects=True, verify=ctx) as client:
+            r = client.get(url)
+            r.raise_for_status()
+            return r.text
+    except Exception:
+        pass
+
+    try:
+        import httpx
+        ctx = ssl.create_default_context()
+        if "robertwaltersplc.com" in host:
+            ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+
+        # Try HTTP/2
+        with httpx.Client(http2=True, headers=HEADERS, timeout=30, follow_redirects=True, verify=ctx) as client:
             r = client.get(url)
             r.raise_for_status()
             return r.text
     except Exception as e:
-        from fastapi import HTTPException
         raise HTTPException(status_code=502, detail=f"Network error fetching {url}: {e}")
 
 
