@@ -132,19 +132,20 @@ def _get_html(url: str) -> str:
     except Exception:
         pass
 
-    # Try 5 (final fallback): Cloudscraper (handles strict TLS/anti-bot on same official domain)
+    # Try 5 (final): curl_cffi with Chrome impersonation (robust JA3/TLS fingerprint)
     try:
-        import cloudscraper
-        scraper = cloudscraper.create_scraper(
-            browser={"browser": "chrome", "platform": "windows", "mobile": False}
+        from curl_cffi import requests as cfreq
+        r = cfreq.get(
+            url,
+            headers=HEADERS,
+            impersonate="chrome124",   # chrome120+ is fine; 124 is modern
+            timeout=30,
+            allow_redirects=True,
         )
-        scraper.headers.update(HEADERS)
-        r = scraper.get(url, timeout=30, allow_redirects=True)
         r.raise_for_status()
         return r.text
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Network error fetching {url}: {e}")
-
 
 def _same_site_pdf(href: str, base_url: str) -> Optional[str]:
     if not href:
