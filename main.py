@@ -8,6 +8,17 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 import pdfplumber
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-GB,en;q=0.9",
+    "Connection": "keep-alive",
+}
+
 ALLOWED_HOSTS = {
     "www.haysplc.com","haysplc.com",
     "www.page.com","page.com",
@@ -35,19 +46,35 @@ def _same_site_pdf(href: str, base_url: str) -> Optional[str]:
     return full
 
 def _get_html(url: str) -> str:
-    r = requests.get(url, timeout=20); r.raise_for_status(); return r.text
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
+        r.raise_for_status()
+        return r.text
+    except requests.HTTPError as e:
+        # surface the cause cleanly instead of a 500
+        raise HTTPException(status_code=502, detail=f"Upstream error fetching {url}: {e.response.status_code}") from e
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Network error fetching {url}: {e}") from e
+
 
 def _fetch_pdfs(base_url: str) -> List[Dict[str, str]]:
-    html = _get_html(base_url)
-    soup = BeautifulSoup(html, "html.parser")
-    out, seen = [], set()
-    for a in soup.find_all("a", href=True):
-        pdf_url = _same_site_pdf(a.get("href"), base_url)
-        if not pdf_url or pdf_url in seen: continue
-        seen.add(pdf_url)
-        title = (a.get_text(strip=True) or pdf_url.split("/")[-1]).strip()
-        out.append({"title": title, "pdf_url": pdf_url, "source_page": base_url})
-    return out
+    try:
+        html = _get_html(base_url)
+        soup = BeautifulSoup(html, "html.parser")
+        out, seen = [], set()
+        for a in soup.find_all("a", href=True):
+            pdf_url = _same_site_pdf(a.get("href"), base_url)
+            if not pdf_url or pdf_url in seen:
+                continue
+            seen.add(pdf_url)
+            title = (a.get_text(strip=True) or pdf_url.split("/")[-1]).strip()
+            out.append({"title": title, "pdf_url": pdf_url, "source_page": base_url})
+        return out
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to parse PDFs from {base_url}: {e}") from e
+
 
 def _download_pdf(pdf_url: str) -> bytes:
     host = urlparse(pdf_url).hostname or ""
