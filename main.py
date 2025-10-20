@@ -132,20 +132,23 @@ def _get_html(url: str) -> str:
     except Exception:
         pass
 
-    # Try 5 (final): curl_cffi with Chrome impersonation (robust JA3/TLS fingerprint)
+    # Try 5: curl_cffi with a list of supported impersonations (pick the first that works)
     try:
         from curl_cffi import requests as cfreq
-        r = cfreq.get(
-            url,
-            headers=HEADERS,
-            impersonate="chrome124",   # chrome120+ is fine; 124 is modern
-            timeout=30,
-            allow_redirects=True,
-        )
-        r.raise_for_status()
-        return r.text
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Network error fetching {url}: {e}")
+        for fp in ["chrome120", "chrome116", "chrome110", "chrome99", "edge101", "firefox110", "safari15_3"]:
+            try:
+                r = cfreq.get(
+                    url,
+                    headers=HEADERS,
+                    impersonate=fp,
+                    timeout=30,
+                    allow_redirects=True,
+                )
+                r.raise_for_status()
+                return r.text
+            except Exception:
+                continue
+        raise HTTPException(status_code=502, detail=f"All_
 
 def _same_site_pdf(href: str, base_url: str) -> Optional[str]:
     if not href:
