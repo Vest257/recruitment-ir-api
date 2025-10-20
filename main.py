@@ -79,7 +79,9 @@ class TLS12RelaxAdapter(HTTPAdapter):
 # -----------------------------
 # HTML fetching (robust)
 # -----------------------------
+
 def _get_html(url: str) -> str:
+    import ssl
     from urllib.parse import urlparse
     host = (urlparse(url).hostname or "").lower()
 
@@ -104,7 +106,7 @@ def _get_html(url: str) -> str:
     except Exception:
         pass
 
-    # Try 3: httpx HTTP/1.1 with relaxed context (often works)
+    # Try 3: httpx HTTP/1.1 with relaxed context
     try:
         import httpx
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
@@ -127,12 +129,23 @@ def _get_html(url: str) -> str:
             r = client.get(url)
             r.raise_for_status()
             return r.text
+    except Exception:
+        pass
+
+    # Try 5 (final fallback): Cloudscraper (handles strict TLS/anti-bot on same official domain)
+    try:
+        import cloudscraper
+        scraper = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "mobile": False}
+        )
+        scraper.headers.update(HEADERS)
+        r = scraper.get(url, timeout=30, allow_redirects=True)
+        r.raise_for_status()
+        return r.text
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Network error fetching {url}: {e}")
 
-# -----------------------------
-# Utilities
-# -----------------------------
+
 def _same_site_pdf(href: str, base_url: str) -> Optional[str]:
     if not href:
         return None
