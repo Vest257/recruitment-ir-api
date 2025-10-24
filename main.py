@@ -50,6 +50,10 @@ app = FastAPI(
     version="2.0.0",
 )
 
+@app.get("/ok")
+def ok():
+    return {"ok": True}
+
 # -----------------------------
 # Utilities
 # -----------------------------
