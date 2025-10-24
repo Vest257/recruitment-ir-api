@@ -1,6 +1,7 @@
-# main.py — robust fetch + PDF extraction API (Hays, PageGroup, Robert Walters)
+# main.py — Hays + PageGroup only (official PDFs), simple & reliable.
 
-import io, re, ssl
+import io
+import re
 from typing import List, Optional, Dict, Any
 from urllib.parse import urljoin, urlparse
 
@@ -16,30 +17,25 @@ import pdfplumber
 ALLOWED_HOSTS = {
     "www.haysplc.com", "haysplc.com",
     "www.page.com", "page.com",
-    "www.robertwaltersplc.com", "robertwaltersplc.com",
 }
 
 HAYS_RESULTS = "https://www.haysplc.com/investors/results-centre"
 PAGE_RESULTS = "https://www.page.com/investors/results-and-presentations"
-RW_RESULTS   = "https://www.robertwaltersplc.com/investors/reports.html"
 
-COMPANY_URLS = {"hays": HAYS_RESULTS, "pagegroup": PAGE_RESULTS, "robertwalters": RW_RESULTS}
+COMPANY_URLS = {
+    "hays": HAYS_RESULTS,
+    "pagegroup": PAGE_RESULTS,
+}
 
 HEADERS = {
-    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                   "AppleWebKit/537.36 (KHTML, like Gecko) "
-                   "Chrome/124.0.0.0 Safari/537.36"),
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-GB,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
     "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
 }
 
 # Filter out ESG/policy PDFs by default
@@ -49,197 +45,55 @@ NEGATIVE_KEYWORDS = [
 ]
 
 app = FastAPI(
-    title="Recruitment Firms Investor PDF API",
-    description="Official investor PDFs + text/table extraction for Hays, PageGroup, and Robert Walters.",
-    version="1.4.0",
+    title="Recruitment IR PDF API (Hays & PageGroup)",
+    description="Fetch official investor PDFs + extract text/tables/metrics for Hays and PageGroup.",
+    version="2.0.0",
 )
-
-# -----------------------------
-# Optional/guarded imports
-# -----------------------------
-def _get_httpx():
-    try:
-        import httpx  # type: ignore
-        return httpx
-    except Exception:
-        return None
-
-def _get_cloudscraper():
-    try:
-        import cloudscraper  # type: ignore
-        return cloudscraper
-    except Exception:
-        return None
-
-def _get_curl_cffi():
-    try:
-        from curl_cffi import requests as cfreq  # type: ignore
-        return cfreq
-    except Exception:
-        return None
-
-def _get_tls12_relax_adapter():
-    """Return a requests Adapter that forces TLS1.2 and lowers SECLEVEL, or None."""
-    try:
-        from requests.adapters import HTTPAdapter
-        from urllib3.poolmanager import PoolManager  # noqa: F401
-
-        class TLS12RelaxAdapter(HTTPAdapter):
-            def init_poolmanager(self, *args, **kwargs):
-                ctx = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
-                try:
-                    ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
-                except Exception:
-                    pass
-                kwargs["ssl_context"] = ctx
-                return super().init_poolmanager(*args, **kwargs)
-        return TLS12RelaxAdapter
-    except Exception:
-        return None
-
-# --- Playwright sync fallback (real Chromium) for Robert Walters only ---
-def _playwright_fetch_html_sync(url: str) -> str:
-    try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent=HEADERS.get("User-Agent"))
-            page = context.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            html = page.content()
-            browser.close()
-            return html
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Playwright fetch failed for {url}: {e}")
-
-# -----------------------------
-# Robust HTML fetcher
-# -----------------------------
-def _get_html(url: str) -> str:
-    from urllib.parse import urlparse
-    host = (urlparse(url).hostname or "").lower()
-
-    # 1) requests (HTTP/1.1)
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
-        r.raise_for_status()
-        return r.text
-    except Exception:
-        pass
-
-    # 2) requests + TLS1.2 + SECLEVEL=1 (RW only)
-    try:
-        if "robertwaltersplc.com" in host:
-            TLS12RelaxAdapter = _get_tls12_relax_adapter()
-            if TLS12RelaxAdapter:
-                from requests.adapters import HTTPAdapter
-                s = requests.Session()
-                s.headers.update(HEADERS)
-                s.mount("https://", TLS12RelaxAdapter())
-                s.mount("http://", HTTPAdapter())
-                r = s.get(url, timeout=30, allow_redirects=True)
-                r.raise_for_status()
-                return r.text
-    except Exception:
-        pass
-
-    # 3) httpx HTTP/1.1
-    httpx = _get_httpx()
-    if httpx:
-        try:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
-            if "robertwaltersplc.com" in host:
-                try: ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
-                except Exception: pass
-            with httpx.Client(http2=False, headers=HEADERS, timeout=30, follow_redirects=True, verify=ctx) as client:
-                r = client.get(url)
-                r.raise_for_status()
-                return r.text
-        except Exception:
-            pass
-        # 4) httpx HTTP/2
-        try:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
-            if "robertwaltersplc.com" in host:
-                try: ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
-                except Exception: pass
-            with httpx.Client(http2=True, headers=HEADERS, timeout=30, follow_redirects=True, verify=ctx) as client:
-                r = client.get(url)
-                r.raise_for_status()
-                return r.text
-        except Exception:
-            pass
-
-    # 5) cloudscraper
-    cloudscraper = _get_cloudscraper()
-    if cloudscraper:
-        try:
-            scraper = cloudscraper.create_scraper(browser={"browser":"chrome","platform":"windows","mobile":False})
-            scraper.headers.update(HEADERS)
-            r = scraper.get(url, timeout=30, allow_redirects=True)
-            r.raise_for_status()
-            return r.text
-        except Exception:
-            pass
-
-    # 6) curl_cffi with several fingerprints
-    cfreq = _get_curl_cffi()
-    if cfreq:
-        for fp in ["chrome120","chrome116","chrome110","chrome99","edge101","firefox110","safari15_3"]:
-            try:
-                r = cfreq.get(url, headers=HEADERS, impersonate=fp, timeout=30, allow_redirects=True)
-                r.raise_for_status()
-                return r.text
-            except Exception:
-                continue
-
-    # 7) Final fallback: real browser via Playwright (RW only, sync)
-    if "robertwaltersplc.com" in host:
-        try:
-            return _playwright_fetch_html_sync(url)
-        except Exception:
-            pass
-
-    # If all strategies failed
-    raise HTTPException(status_code=502, detail=f"Network error fetching {url}: all client strategies failed")
 
 # -----------------------------
 # Utilities
 # -----------------------------
+def _get_html(url: str) -> str:
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
+        r.raise_for_status()
+        return r.text
+    except requests.HTTPError as e:
+        code = getattr(e.response, "status_code", "unknown")
+        raise HTTPException(status_code=502, detail=f"Upstream error fetching {url} (status {code})")
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Network error fetching {url}: {e}")
+
 def _same_site_pdf(href: str, base_url: str) -> Optional[str]:
-    if not href: return None
+    if not href:
+        return None
     full = urljoin(base_url, href)
-    if not full.lower().endswith(".pdf"): return None
+    if not full.lower().endswith(".pdf"):
+        return None
     host = urlparse(full).hostname or ""
-    if host not in ALLOWED_HOSTS: return None
+    if host not in ALLOWED_HOSTS:
+        return None
     return full
 
 def _fetch_pdfs(base_url: str) -> List[Dict[str, str]]:
-    # Cache buster for RW
-    if "robertwaltersplc.com" in base_url and "nocache" not in base_url:
-        base_url = base_url + ("?nocache=1" if "?" not in base_url else "&nocache=1")
-    try:
-        html = _get_html(base_url)
-        soup = BeautifulSoup(html, "html.parser")
-        out, seen = [], set()
-        for a in soup.find_all("a", href=True):
-            pdf_url = _same_site_pdf(a.get("href"), base_url)
-            if not pdf_url or pdf_url in seen: continue
-            seen.add(pdf_url)
-            title = (a.get_text(strip=True) or pdf_url.split("/")[-1]).strip()
-            out.append({"title": title, "pdf_url": pdf_url, "source_page": base_url})
-        return out
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to parse PDFs from {base_url}: {e}")
+    html = _get_html(base_url)
+    soup = BeautifulSoup(html, "html.parser")
+    out, seen = [], set()
+    for a in soup.find_all("a", href=True):
+        pdf_url = _same_site_pdf(a.get("href"), base_url)
+        if not pdf_url or pdf_url in seen:
+            continue
+        seen.add(pdf_url)
+        title = (a.get_text(strip=True) or pdf_url.split("/")[-1]).strip()
+        out.append({"title": title, "pdf_url": pdf_url, "source_page": base_url})
+    return out
 
 def _download_pdf(pdf_url: str) -> bytes:
     host = urlparse(pdf_url).hostname or ""
     if host not in ALLOWED_HOSTS:
         raise HTTPException(status_code=400, detail="PDF host not allowed.")
     try:
-        r = requests.get(pdf_url, headers=HEADERS, timeout=30)
+        r = requests.get(pdf_url, headers=HEADERS, timeout=45)
         r.raise_for_status()
         if "pdf" not in r.headers.get("Content-Type", "").lower() and not pdf_url.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="URL is not a PDF.")
@@ -256,20 +110,16 @@ def _download_pdf(pdf_url: str) -> bytes:
 class TextExtractReq(BaseModel):
     pdf_url: str
     pages: Optional[List[int]] = None
-    ocr: Optional[bool] = True
     dedupe_whitespace: Optional[bool] = True
 
 class TablesExtractReq(BaseModel):
     pdf_url: str
     pages: Optional[List[int]] = None
-    merge_multiline: Optional[bool] = True
-    include_headers: Optional[bool] = True
 
 class MetricsExtractReq(BaseModel):
     pdf_url: str
-    company: str  # "hays" | "pagegroup" | "robertwalters"
+    company: str  # "hays" | "pagegroup"
     expected_period_label: Optional[str] = None
-    apply_hays_fiscal_mapping: Optional[bool] = True
     metrics: Optional[List[str]] = None
     countries: Optional[List[str]] = None
     basis_preference_order: Optional[List[str]] = ["Like-for-like","Constant FX","Underlying","Reported"]
@@ -279,7 +129,7 @@ class MetricsExtractReq(BaseModel):
 # -----------------------------
 @app.get("/reports")
 def fetch_reports(
-    company: str = Query(..., enum=["hays","pagegroup","robertwalters"]),
+    company: str = Query(..., enum=["hays", "pagegroup"]),
     report_type: Optional[str] = None,
     limit: int = Query(5, ge=1, le=20),
     exclude_esg: bool = Query(True, description="Exclude ESG/policy PDFs by default")
@@ -324,7 +174,8 @@ def extract_tables(req: TablesExtractReq):
         for idx in page_indices:
             page = pdf.pages[idx]
             words = page.extract_words() or []
-            if not words: continue
+            if not words: 
+                continue
             rows_map: Dict[int, List[Dict[str, Any]]] = {}
             for w in words:
                 key = int(round(w["top"]))
@@ -351,6 +202,7 @@ def extract_tables(req: TablesExtractReq):
                 })
     return {"pdf_url": req.pdf_url, "tables": tables_out}
 
+# simple patterns for a first-pass metric extraction
 COUNTRY_PATTERN = r"(Germany|United Kingdom|UK|France|Australia|Netherlands|Belgium|Spain|Portugal|Italy|Japan|China|Hong Kong|Singapore|USA|United States|Canada|Switzerland|Austria|Ireland|Poland|Czech Republic|UAE|United Arab Emirates|New Zealand|India|Brazil|Chile|Mexico)"
 VALUE_PATTERN = r"([+\-]?\d+(?:\.\d+)?)\s*%"
 
@@ -374,7 +226,7 @@ def extract_metrics(req: MetricsExtractReq):
                 if req.metrics and metric_name not in req.metrics: continue
                 if req.countries and norm_country not in req.countries: continue
                 items.append({
-                    "company": {"hays":"Hays plc","pagegroup":"PageGroup","robertwalters":"Robert Walters plc"}[req.company],
+                    "company": {"hays":"Hays plc","pagegroup":"PageGroup"}[req.company],
                     "report_title": None, "report_date": None,
                     "country": norm_country, "region": None,
                     "metric": metric_name, "value": val, "unit": "%",
